@@ -2,19 +2,19 @@ import os
 import asyncio
 import discord
 from discord.ext import tasks
-from python_aternos import Client as AternosClient
 from dotenv import load_dotenv
+import cloudscraper
+import json
 
 load_dotenv()
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 CHANNEL_ID    = int(os.environ.get("CHANNEL_ID", "0"))
 ATERNOS_USER  = os.environ.get("ATERNOS_USER", "")
 ATERNOS_PASS  = os.environ.get("ATERNOS_PASS", "")
 SERVER_NAME   = os.environ.get("SERVER_NAME", "")
 
-# Debug: print env vars (sensor value)
 print(f"[Config] DISCORD_TOKEN: {'SET' if DISCORD_TOKEN else 'MISSING'}")
 print(f"[Config] CHANNEL_ID: {CHANNEL_ID}")
 print(f"[Config] ATERNOS_USER: {ATERNOS_USER}")
@@ -26,47 +26,68 @@ intents.message_content = True
 bot = discord.Client(intents=intents)
 
 # State global
-aternos_server = None
 status_message_id = None
+scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+)
+server_info = {
+    "status": "offline",
+    "address": f"{SERVER_NAME}.aternos.me",
+    "players": 0,
+    "maxPlayers": 20,
+    "software": "Forge",
+    "version": "1.20.1"
+}
 
-# ── Connect ke Aternos ────────────────────────────────────────────────────────
-def get_aternos_server():
-    global aternos_server
+# ── Aternos Login & Control ───────────────────────────────────────────────────
+BASE = "https://aternos.org"
+
+def aternos_login():
     try:
-        print("[Aternos] Logging in...")
-        client = AternosClient.from_credentials(ATERNOS_USER, ATERNOS_PASS)
-        servers = client.list_servers()
-        print(f"[Aternos] Found {len(servers)} server(s)")
-        for s in servers:
-            print(f"[Aternos] Server: {s.address}")
-            if SERVER_NAME.lower() in s.address.lower():
-                aternos_server = s
-                return s
-        aternos_server = servers[0]
-        return servers[0]
+        print("[Aternos] Attempting login...")
+        # Get login page first
+        r = scraper.get(f"{BASE}/go/")
+        # Login
+        r = scraper.post(f"{BASE}/panel/ajax/account/login.php", data={
+            "username": ATERNOS_USER,
+            "password": ATERNOS_PASS
+        })
+        print(f"[Aternos] Login response: {r.status_code}")
+        return r.status_code == 200
     except Exception as e:
-        print(f"[Aternos] Error: {e}")
-        return None
+        print(f"[Aternos] Login error: {e}")
+        return False
+
+def aternos_get_status():
+    global server_info
+    try:
+        r = scraper.get(f"{BASE}/panel/ajax/status.php", params={"server": SERVER_NAME})
+        if r.status_code == 200:
+            data = r.json()
+            server_info["status"]  = data.get("class", "offline")
+            server_info["players"] = data.get("players", {}).get("online", 0)
+            server_info["maxPlayers"] = data.get("players", {}).get("max", 20)
+            print(f"[Aternos] Status: {server_info['status']}, Players: {server_info['players']}")
+    except Exception as e:
+        print(f"[Aternos] Status error: {e}")
+
+def aternos_action(action):
+    try:
+        r = scraper.get(f"{BASE}/panel/ajax/server/{action}.php", params={"server": SERVER_NAME})
+        print(f"[Aternos] Action {action}: {r.status_code}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[Aternos] Action error: {e}")
+        return False
 
 # ── Build Embed & Buttons ─────────────────────────────────────────────────────
 def build_embed_and_buttons():
-    try:
-        if aternos_server:
-            aternos_server.fetch()
-        status   = aternos_server.status if aternos_server else "offline"
-        address  = aternos_server.address if aternos_server else "unknown"
-        players  = aternos_server.players_on if aternos_server else 0
-        maxplay  = aternos_server.players_max if aternos_server else 20
-        software = aternos_server.software if aternos_server else "Forge"
-        version  = aternos_server.version if aternos_server else "1.20.1"
-    except Exception as e:
-        print(f"[Embed] Error fetching server info: {e}")
-        status   = "offline"
-        address  = SERVER_NAME + ".aternos.me"
-        players  = 0
-        maxplay  = 20
-        software = "Forge"
-        version  = "1.20.1"
+    status   = server_info.get("status", "offline")
+    address  = server_info.get("address", f"{SERVER_NAME}.aternos.me")
+    players  = server_info.get("players", 0)
+    maxplay  = server_info.get("maxPlayers", 20)
+    software = server_info.get("software", "Forge")
+    version  = server_info.get("version", "1.20.1")
 
     status_map = {
         "online":   ("🟢 Online",    0x00ff88),
@@ -75,17 +96,19 @@ def build_embed_and_buttons():
         "stopping": ("🟠 Stopping…", 0xff8800),
         "loading":  ("🟡 Loading…",  0xffcc00),
         "saving":   ("🟠 Saving…",   0xff8800),
+        "waiting":  ("⏳ Waiting…",  0xffcc00),
+        "preparing":("🟡 Preparing…",0xffcc00),
     }
     status_text, color = status_map.get(status, ("⚪ Unknown", 0x888888))
 
     is_online  = status == "online"
-    is_offline = status == "offline"
+    is_offline = status in ("offline", "")
 
     embed = discord.Embed(title="🎮  Create SMP", color=color)
-    embed.add_field(name="📡 Status",    value=status_text,           inline=True)
-    embed.add_field(name="👥 Players",   value=f"{players}/{maxplay}", inline=True)
-    embed.add_field(name="🌐 Address",   value=f"`{address}`",        inline=True)
-    embed.add_field(name="⚙️ Software",  value=f"{software} {version}", inline=True)
+    embed.add_field(name="📡 Status",   value=status_text,             inline=True)
+    embed.add_field(name="👥 Players",  value=f"{players}/{maxplay}",  inline=True)
+    embed.add_field(name="🌐 Address",  value=f"`{address}`",          inline=True)
+    embed.add_field(name="⚙️ Software", value=f"{software} {version}", inline=True)
     embed.set_footer(text="Auto-update tiap 30 detik • Create SMP")
     embed.timestamp = discord.utils.utcnow()
 
@@ -121,6 +144,8 @@ async def update_status_message():
 # ── Auto Update Loop ──────────────────────────────────────────────────────────
 @tasks.loop(seconds=30)
 async def auto_update():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, aternos_get_status)
     await update_status_message()
 
 # ── Bot Ready ─────────────────────────────────────────────────────────────────
@@ -128,7 +153,8 @@ async def auto_update():
 async def on_ready():
     print(f"[Bot] Logged in as {bot.user}")
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, get_aternos_server)
+    await loop.run_in_executor(None, aternos_login)
+    await loop.run_in_executor(None, aternos_get_status)
     await update_status_message()
     if not auto_update.is_running():
         auto_update.start()
@@ -138,35 +164,41 @@ async def on_ready():
 async def on_interaction(interaction: discord.Interaction):
     if interaction.type != discord.InteractionType.component:
         return
-
     custom_id = interaction.data.get("custom_id", "")
     if not custom_id.startswith("mc_"):
         return
 
     await interaction.response.defer(ephemeral=True)
-
-    if not aternos_server:
-        await interaction.followup.send("❌ Bot belum terhubung ke Aternos!", ephemeral=True)
-        return
-
     loop = asyncio.get_event_loop()
+
     try:
         if custom_id == "mc_start":
-            await loop.run_in_executor(None, aternos_server.start)
-            await interaction.followup.send("✅ Server sedang dinyalakan! Tunggu ~2-5 menit.", ephemeral=True)
+            ok = await loop.run_in_executor(None, lambda: aternos_action("start"))
+            await interaction.followup.send(
+                "✅ Perintah start dikirim! Tunggu ~2-5 menit (termasuk antrian Aternos)." if ok
+                else "❌ Gagal mengirim perintah start.", ephemeral=True)
+
         elif custom_id == "mc_stop":
-            await loop.run_in_executor(None, aternos_server.stop)
-            await interaction.followup.send("✅ Server sedang dimatikan...", ephemeral=True)
+            ok = await loop.run_in_executor(None, lambda: aternos_action("stop"))
+            await interaction.followup.send(
+                "✅ Server sedang dimatikan..." if ok
+                else "❌ Gagal mengirim perintah stop.", ephemeral=True)
+
         elif custom_id == "mc_restart":
-            await loop.run_in_executor(None, aternos_server.restart)
-            await interaction.followup.send("✅ Server sedang restart...", ephemeral=True)
+            ok = await loop.run_in_executor(None, lambda: aternos_action("restart"))
+            await interaction.followup.send(
+                "✅ Server sedang restart..." if ok
+                else "❌ Gagal mengirim perintah restart.", ephemeral=True)
+
         elif custom_id == "mc_backup":
             await interaction.followup.send(
                 "💾 Backup manual: buka panel Aternos → **Backups** → Create Backup\n🔗 https://aternos.org/server/",
-                ephemeral=True
-            )
+                ephemeral=True)
+
         await asyncio.sleep(3)
+        await loop.run_in_executor(None, aternos_get_status)
         await update_status_message()
+
     except Exception as e:
         print(f"[Button] Error {custom_id}: {e}")
         await interaction.followup.send(f"❌ Error: `{str(e)}`", ephemeral=True)
