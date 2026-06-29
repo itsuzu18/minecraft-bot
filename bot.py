@@ -10,7 +10,7 @@ load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────────────
 DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID       = int(os.getenv("CHANNEL_ID"))
+CHANNEL_ID       = int(os.getenv("CHANNEL_ID", "0"))
 ATERNOS_USER     = os.getenv("ATERNOS_USER")
 ATERNOS_PASS     = os.getenv("ATERNOS_PASS")
 SERVER_NAME      = os.getenv("SERVER_NAME")  # nama server di aternos (itzuchi, dll)
