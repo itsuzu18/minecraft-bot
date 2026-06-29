@@ -4,7 +4,6 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from python_aternos import Client as AternosClient
-from python_aternos import ServerStatus
 from dotenv import load_dotenv
 
 load_dotenv()
